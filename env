@@ -1,0 +1,9 @@
+# Google Gemini API Key
+GOOGLE_API_KEY= " put your google api key here "
+
+# Tavily Search API Key
+TAVILY_API_KEY= " put your google api key here "
+
+# Put your MONGODB URL
+MONGODB_URL= " your mondgodb key goes here "
+DATABASE_NAME= " create a db name "
