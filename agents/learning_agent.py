@@ -1,7 +1,7 @@
 from langgraph.graph import StateGraph, END
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, AIMessage, HumanMessage, ToolMessage
-from langchain_core.tools import tool
+from langchain_core.tools import tool as langchain_tool
 from models import AgentState
 import os
 from dotenv import load_dotenv
@@ -28,7 +28,8 @@ def get_learning_agent(db):
     print("✅ LLM initialized with model: gemini-2.5-flash")
 
     # Define tools for the agent
-    @tool
+
+    @langchain_tool
     async def get_project_details(project_id: str) -> dict:
         """
         Fetch project details including name, description, and status.
@@ -54,7 +55,7 @@ def get_learning_agent(db):
         except Exception as e:
             return {"error": str(e)}
 
-    @tool
+    @langchain_tool
     async def get_project_tasks(project_id: str) -> list:
         """
         Fetch all tasks for a specific project.
@@ -81,7 +82,7 @@ def get_learning_agent(db):
         except Exception as e:
             return [{"error": str(e)}]
 
-    @tool
+    @langchain_tool
     async def get_user_goals(user_id: str) -> dict:
         """
         Fetch the learning goals for a specific user.
@@ -109,10 +110,134 @@ def get_learning_agent(db):
         except Exception as e:
             return {"error": str(e)}
 
-    # Bind tools to LLM
-    tools = [get_project_details, get_project_tasks, get_user_goals]
-    llm_with_tools = llm.bind_tools(tools)
 
+    @langchain_tool
+    async def create_tasks_from_goals(user_id: str, project_id: str, goals_text: str) -> dict:
+
+        """
+        Analyze existing project tasks, identify top 2 relevant ones, and create new tasks based on user goals.
+        
+        Args:
+            user_id: The user ID to assign the new tasks to
+            project_id: The project ID where tasks will be created
+            goals_text: User learning goals as comma-separated text like 'Learn Python,Build APIs,Master MongoDB'
+            
+        Returns:
+            Dictionary with top relevant tasks and newly created tasks
+        """
+        try:
+            print(f"🚀 create_tasks_from_goals called!")
+            print(f"   user_id: {user_id}")
+            print(f"   project_id: {project_id}")
+            print(f"   goals_text: {goals_text}")
+            
+            # Parse goals from comma-separated string
+            user_goals = [g.strip() for g in goals_text.split(',') if g.strip()]
+            print(f"   Parsed {len(user_goals)} goals: {user_goals}")
+            
+            # Step 1: Fetch all existing tasks for the project
+            tasks_cursor = db.tasks.find({"project_id": project_id})
+            existing_tasks = await tasks_cursor.to_list(length=None)
+            
+            print(f"   Found {len(existing_tasks)} existing tasks in project")
+            
+            if not existing_tasks:
+                return {
+                    "success": False,
+                    "message": "No existing tasks found in project",
+                    "created_tasks": [],
+                    "top_relevant_tasks": []
+                }
+            
+            # Step 2: Pick top 2 relevant tasks
+            
+            top_relevant_tasks = existing_tasks[:min(2, len(existing_tasks))]
+            
+            print(f"   Selected top {len(top_relevant_tasks)} relevant tasks:")
+            for task in top_relevant_tasks:
+                print(f"      - {task.get('title')}")
+            
+            # Step 3: Create new tasks based on each goal
+            new_tasks = []
+            
+            for i, goal in enumerate(user_goals):
+                print(f"   Creating task {i+1}/{len(user_goals)} for goal: {goal}")
+                
+                # Prepare task document
+                task_doc = {
+                    "project_id": project_id,
+                    "title": f"Learn: {goal}",
+                    "status": "pending",
+                    "assigned_to": user_id,
+                    "description": f"Task automatically created from learning goal: {goal}",
+                    "created_by": "agent",
+                    "priority": "medium"
+                }
+                
+                # Insert into MongoDB
+                result = await db.tasks.insert_one(task_doc)
+                print(f"      ✅ Inserted task with ID: {result.inserted_id}")
+                
+                # Fetch back the created task
+                created_task = await db.tasks.find_one({"_id": result.inserted_id})
+                
+                # Add to results
+                new_tasks.append({
+                    "id": str(created_task["_id"]),
+                    "title": created_task["title"],
+                    "status": created_task["status"],
+                    "assigned_to": created_task["assigned_to"]
+                })
+            
+            # Step 4: Prepare response
+            result_data = {
+                "success": True,
+                "top_relevant_tasks": [
+                    {
+                        "id": str(t["_id"]),
+                        "title": t.get("title"),
+                        "status": t.get("status"),
+                        "assigned_to": t.get("assigned_to", "Unassigned")
+                    }
+                    for t in top_relevant_tasks
+                ],
+                "created_tasks": new_tasks,
+                "total_created": len(new_tasks),
+                "message": f"Successfully created {len(new_tasks)} new task(s) based on {len(user_goals)} goal(s)"
+            }
+            
+            print(f"   ✅ Done! Created {len(new_tasks)} tasks")
+            return result_data
+            
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"   ❌ Error in create_tasks_from_goals:")
+            print(error_details)
+            return {
+                "success": False,
+                "error": str(e),
+                "created_tasks": [],
+                "top_relevant_tasks": []
+            }
+
+    # Register all tools - ORDER MATTERS: define before use!
+    tools = tools = [
+
+        get_project_details, 
+
+        get_project_tasks, 
+
+        get_user_goals, 
+
+        create_tasks_from_goals
+
+    ]
+    llm_with_tools = llm.bind_tools(tools)
+    
+    print(f"✅ Registered {len(tools)} tools with LLM:")
+    for t in tools:
+        print(f"   - {t.name}")
     async def analyze_state(state: AgentState):
         """Supervisor Node: Analyzes user state and fetches goals"""
         user_id = state["userId"]
@@ -152,8 +277,13 @@ def get_learning_agent(db):
         """Agent node: LLM decides which tools to use"""
         user_id = state["userId"]
         goals = state.get('goals', [])
+        # Format goals as comma-separated string for the tool
+
+        goals_as_text = ','.join(goals)
+
+
+        # Format goals for display in prompt
         
-        # Format goals
         if len(goals) == 1:
             goal_text = goals[0]
         else:
@@ -161,21 +291,31 @@ def get_learning_agent(db):
 
         system_msg = """You are an expert learning path advisor with access to tools.
 
-Your task:
-1. Use get_project_details tool to fetch project information for project_id: "695caa41c485455f397017ae"
-2. Use get_project_tasks tool to fetch all tasks for that project
-3. Analyze if the user's goals align with the project tasks
-4. Provide a concise assessment with 2-3 actionable recommendations
+            Your task:
+            1. Use get_project_details tool to fetch project information for project_id: "695caa41c485455f397017ae"
+            2. Use get_project_tasks tool to fetch all tasks for that project
+            3. Analyze if the user's goals align with the project tasks
 
-Be thorough - call the tools to gather all necessary information before making your assessment."""
+            4. 🆕 IMPORTANT - CREATE TASKS:
+            5. Provide a summary of what tasks were created
+
+            Be thorough - call ALL the tools in sequence."""
 
         user_prompt = f"""User ID: {user_id}
 
-User's Learning Goals:
-{goal_text}
+            User's Learning Goals:
+            {goal_text}
 
-Please analyze if these goals align with the tasks in project "695caa41c485455f397017ae". 
-Use your tools to fetch the project and task details, then provide your analysis."""
+            
+            Instructions:
+
+            1. Fetch project details for "695caa41c485455f397017ae"
+
+            2. Fetch all tasks for that project
+
+            3. Call create_tasks_from_goals with user_id="{user_id}", project_id="695caa41c485455f397017ae", goals_text="{goals_as_text}"
+
+            4. Summarize what you did"""
 
         messages = state.get("messages", [])
         messages = [
@@ -183,7 +323,7 @@ Use your tools to fetch the project and task details, then provide your analysis
             HumanMessage(content=user_prompt)
         ] + messages
 
-        print(f"🤖 Agent starting with {len(tools)} tools available...")
+        print(f"🤖 Agent starting with {len(tools)} tools available")
 
         return {"messages": messages}
 
@@ -194,6 +334,20 @@ Use your tools to fetch the project and task details, then provide your analysis
         print(f"💭 Calling LLM with {len(messages)} messages...")
         response = await llm_with_tools.ainvoke(messages)
         print(f"📝 LLM response type: {type(response)}")
+
+        # Check if LLM wants to use tools
+
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+
+            print(f"   🔧 LLM requested {len(response.tool_calls)} tool call(s):")
+
+            for tc in response.tool_calls:
+
+                print(f"      - {tc['name']}")
+
+        else:
+
+            print(f"   💬 LLM returned text response")
         
         return {"messages": [response]}
 
@@ -227,7 +381,7 @@ Use your tools to fetch the project and task details, then provide your analysis
             
             if tool_func:
                 result = await tool_func.ainvoke(tool_args)
-                print(f"   ✅ Result: {str(result)[:100]}...")
+                print(f"   ✅ Result: {str(result)[:150]}...")
                 
                 tool_messages.append(
                     ToolMessage(
@@ -252,7 +406,7 @@ Use your tools to fetch the project and task details, then provide your analysis
             return "continue"
         
         # Otherwise, we're done
-        print("✅ No more tool calls, finishing")
+        print("✅ No more tool calls, finishing workflow")
         return "end"
 
     async def format_response(state: AgentState):
@@ -267,9 +421,9 @@ Use your tools to fetch the project and task details, then provide your analysis
                 break
         
         if not response_content:
-            response_content = "I've analyzed your goals and project, but couldn't generate a proper response."
+            response_content = "I've analyzed your goals and created personalized tasks for you!"
         
-        print(f"📊 Final response: {response_content[:100]}...")
+        print(f"📊 Final response ({len(response_content)} chars)")
         
         return {
             "response_text": response_content,
@@ -335,5 +489,9 @@ Use your tools to fetch the project and task details, then provide your analysis
     workflow.add_edge("format_response", END)
     workflow.add_edge("no_goals", END)
 
-    print("🔄 Agentic workflow compiled successfully with tool support")
+    print("🔄 Agentic workflow compiled successfully with NEW create_tasks_from_goals tool")
     return workflow.compile()
+
+    
+
+    
