@@ -25,18 +25,12 @@ def serialize(doc):
 async def chat_with_agent(request: Request, agent_req: AgentRequest = Body(...)):
     """
     Invoke the learning agent for a user.
-    The agent will:
-    1. Check if user has goals
-    2. If no goals, ask them to set goals
-    3. If goals exist, fetch project tasks and assign 3 relevant tasks
-    4. Return the response
     """
     db = request.app.state.db
     user_id = agent_req.userId
 
     print(f"🚀 Agent invoked for user: {user_id}")
 
-    # Run the Agent
     try:
         print("⚙️ Running learning agent...")
         result = await run_learning_agent(db, user_id)
@@ -51,7 +45,6 @@ async def chat_with_agent(request: Request, agent_req: AgentRequest = Body(...))
         agent_response = f"An error occurred: {str(e)}"
         status = "error"
 
-    # Store the agent's response in chat history
     agent_chat_doc = {
         "userId": user_id,
         "userType": "agent",
@@ -62,7 +55,6 @@ async def chat_with_agent(request: Request, agent_req: AgentRequest = Body(...))
     result = await db.chats.insert_one(agent_chat_doc)
     print(f"💾 Stored agent response in chat history")
 
-    # Return the serialized agent message
     created_chat = await db.chats.find_one({"_id": result.inserted_id})
     return serialize(created_chat)
 

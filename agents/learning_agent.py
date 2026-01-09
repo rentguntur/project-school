@@ -1,12 +1,16 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 from langchain_core.tools import tool
+from langsmith import traceable
 import os
 from dotenv import load_dotenv
 from bson import ObjectId
 
 # Load environment variables
 load_dotenv()
+
+# LangSmith will automatically trace if environment variables are set
+# No additional code needed - just set LANGCHAIN_TRACING_V2=true in .env
 
 
 def get_learning_agent(db):
@@ -30,6 +34,7 @@ def get_learning_agent(db):
     return SimpleLearningAgent(db)
 
 
+@traceable(name="Learning Agent", tags=["agent", "task-assignment"])
 async def run_learning_agent(db, user_id: str) -> dict:
     """
     Simple learning agent that:
@@ -176,29 +181,45 @@ async def run_learning_agent(db, user_id: str) -> dict:
         print("✅ Tools bound to LLM\n")
         
         # Create the prompt
-        system_prompt = """You are a learning path advisor. Your job is to:
+        system_prompt = """You are an expert learning path advisor with access to tools.
 
-1. Get the user's learning goals using get_user_goals tool
-2. Get project details for project_id "695caa41c485455f397017ae" using get_project_details
-3. Get all tasks for that project using get_project_tasks
-4. Analyze the goals and tasks to select the best 3 tasks (foundation → intermediate → advanced)
-5. Assign each of the 3 tasks to the user using assign_task_to_user tool
-6. Return ONLY a numbered list of the 3 task titles you assigned
+Your task:
+1. Use get_user_goals tool to fetch the user's learning goals
+2. Use get_project_details tool to fetch project information for project_id: "695caa41c485455f397017ae"
+3. Use get_project_tasks tool to fetch ALL tasks for that project
+4. Carefully analyze user's learning goals against the project name, description, and each task's title and description
+5. Identify exactly 6 tasks in the specific order that creates an incremental learning path (foundation → intermediate → advanced)
+6. Use assign_task_to_user tool to assign each of the 6 tasks to the user in the correct learning sequence
 
-Important:
-- Call tools in the correct order
-- Select tasks that match the user's goals
-- Assign ALL 3 tasks before responding
-- Final response should be ONLY the 3 task titles in a numbered list"""
+RESPONSE FORMAT - After assigning tasks, return ONLY task titles in this exact format:
+1. [Task Title 1]
+2. [Task Title 2]
+3. [Task Title 3]
+4. [Task Title 4]
+5. [Task Title 5]
+6. [Task Title 6]
 
-        user_prompt = f"""Create a learning path for user_id: {user_id}
+IMPORTANT RULES:
+- Read actual task content (title AND description) before recommending
+- Ensure logical progression: easier concepts first, then build complexity
+- Match tasks closely to user's stated learning goals
+- Foundation task: Basic concepts, prerequisites, introductory material
+- Intermediate task: Building on basics, practical application
+- Advanced task: Complex topics, integration, real-world projects
+- Assign ALL 6 tasks to the user using assign_task_to_user tool
+- Return ONLY the 6 task titles as a numbered list in your final response (no explanations)"""
 
-Steps:
-1. Get my goals
-2. Get project "695caa41c485455f397017ae" and its tasks
-3. Select 3 tasks that match my goals
-4. Assign all 3 tasks to me
-5. Show me the 3 task titles"""
+        user_prompt = f"""User ID: {user_id}
+
+Please create my personalized learning path:
+1. Fetch my learning goals
+2. Fetch project "695caa41c485455f397017ae" and ALL its tasks
+3. Analyze which tasks best match my goals
+4. Select exactly 6 tasks in order: foundation → intermediate → advanced
+5. Assign all 6 tasks to me using assign_task_to_user tool
+6. Return ONLY the 6 task titles as a numbered list
+
+Remember: The order matters! Start with foundational concepts, then build up to advanced topics."""
 
         # Initialize conversation
         messages = [

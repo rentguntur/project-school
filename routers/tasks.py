@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Request, Body, HTTPException
-from models import Task, TaskUpdate, UserTaskLink
+from models import Task, TaskUpdate, UserTaskLink, TaskResponse
 from utils.helpers import serialize
 from bson import ObjectId
-from typing import List
+from typing import List, Optional, Literal
+from datetime import datetime
 
 router = APIRouter()
 
@@ -17,12 +18,54 @@ async def create_task(request: Request, task: Task = Body(...)):
     return serialize(new_task)
 
 
-@router.get("/user/{user_id}", response_model=List[Task])
+@router.get("/user/{user_id}", response_model=List[TaskResponse])
 async def get_user_tasks(request: Request, user_id: str):
+    """
+    Get all tasks assigned to a user from the assignments collection.
+    """
     db = request.app.state.db
-    # Find all tasks assigned to this user
-    cursor = db.tasks.find({"assigned_to": user_id})
-    return [serialize(doc) async for doc in cursor]
+    
+    # Get user's assignment document
+    assignment = await db.assignments.find_one({"userId": user_id})
+    
+    if not assignment or not assignment.get("tasks"):
+        return []
+    
+    response_tasks = []
+    
+    for task_assignment in assignment["tasks"]:
+        task_id = task_assignment["taskId"]
+        
+        # Validate ObjectId
+        if not ObjectId.is_valid(task_id):
+            continue
+        
+        # Fetch task details
+        task = await db.tasks.find_one({"_id": ObjectId(task_id)})
+        if not task:
+            continue
+        
+        # Fetch project details
+        project = await db.projects.find_one({"_id": ObjectId(task["project_id"])})
+        if not project:
+            continue
+        
+        # Build response
+        task_response = TaskResponse(
+            taskId=task_id,
+            name=task.get("title", ""),
+            description=task.get("description"),
+            projectId=task["project_id"],
+            projectName=project.get("name", ""),
+            assignedBy=task_assignment.get("assignedBy", "admin"),
+            sequenceId=task_assignment.get("sequenceId"),
+            isCompleted=task_assignment.get("isCompleted", False),
+            comments=task_assignment.get("comments", [])
+        )
+        
+        response_tasks.append(task_response)
+    
+    return response_tasks
 
 
 @router.put("/{task_id}", response_model=Task)
@@ -37,22 +80,94 @@ async def update_task_status(request: Request, task_id: str, update: TaskUpdate)
     updated = await db.tasks.find_one({"_id": ObjectId(task_id)})
     return serialize(updated)
 
+
 @router.post("/user-tasks", status_code=201)
 async def link_user_to_task(request: Request, payload: UserTaskLink = Body(...)):
+    """
+    Assign a task to a user by adding it to the assignments collection.
+    Creates or updates the user's assignment document.
+    """
     db = request.app.state.db
     
-    # 1. Validate that the taskId is a real MongoDB ObjectId
+    # Validate taskId
     if not ObjectId.is_valid(payload.taskId):
         raise HTTPException(status_code=400, detail="Invalid taskId format")
     
-    # 2. Update the task in the database
-    # We set the 'assigned_to' field of the task to the provided userId
-    result = await db.tasks.update_one(
-        {"_id": ObjectId(payload.taskId)},
-        {"$set": {"assigned_to": payload.userId}}
+    # Verify task exists
+    task = await db.tasks.find_one({"_id": ObjectId(payload.taskId)})
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    # Create task assignment object
+    task_assignment = {
+        "taskId": payload.taskId,
+        "assignedBy": payload.assignedBy,
+        "sequenceId": payload.sequenceId,
+        "isCompleted": False,
+        "comments": []
+    }
+    
+    # Update or create assignment document
+    result = await db.assignments.update_one(
+        {"userId": payload.userId},
+        {
+            "$addToSet": {"tasks": task_assignment}
+        },
+        upsert=True
     )
     
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Task not found")
+    return {
+        "status": "success", 
+        "message": f"Task {payload.taskId} assigned to user {payload.userId}"
+    }
+
+
+@router.put("/user-tasks/{user_id}/{task_id}", status_code=200)
+async def update_user_task_assignment(
+    request: Request, 
+    user_id: str, 
+    task_id: str,
+    isCompleted: Optional[bool] = None,
+    sequenceId: Optional[int] = None,
+    comment: Optional[str] = None,
+    commentBy: Optional[Literal["user", "admin"]] = None
+):
+    """
+    Update a specific task assignment for a user.
+    Can update completion status, sequence, or add comments.
+    """
+    db = request.app.state.db
+    
+    update_fields = {}
+    
+    if isCompleted is not None:
+        update_fields["tasks.$[elem].isCompleted"] = isCompleted
+    
+    if sequenceId is not None:
+        update_fields["tasks.$[elem].sequenceId"] = sequenceId
+    
+    # Add comment if provided
+    if comment and commentBy:
+        new_comment = {
+            "comment": comment,
+            "commentBy": commentBy,
+            "createdAt": datetime.now()
+        }
+        await db.assignments.update_one(
+            {"userId": user_id},
+            {"$push": {"tasks.$[elem].comments": new_comment}},
+            array_filters=[{"elem.taskId": task_id}]
+        )
+    
+    # Update other fields if any
+    if update_fields:
+        result = await db.assignments.update_one(
+            {"userId": user_id},
+            {"$set": update_fields},
+            array_filters=[{"elem.taskId": task_id}]
+        )
         
-    return {"status": "success", "message": f"Task {payload.taskId} assigned to user {payload.userId}"}
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+    
+    return {"status": "success", "message": "Assignment updated"}

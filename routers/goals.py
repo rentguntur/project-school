@@ -20,7 +20,6 @@ async def set_user_goals(request: Request, goal_data: Goal = Body(...)):
     """Set or update user goals (upsert operation)"""
     db = request.app.state.db
 
-    # Update if exists, otherwise create (Upsert)
     await db.goals.update_one(
         {"userId": goal_data.userId},
         {"$set": {
