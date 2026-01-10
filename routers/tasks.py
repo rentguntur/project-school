@@ -320,3 +320,62 @@ async def save_task_comment(request: Request, payload: TaskCommentRequest = Body
         "message": "Comment saved successfully",
         "comment": new_comment
     }
+
+
+@router.post("/update-task-completion-status", status_code=200)
+async def update_task_completion_status(request: Request, payload: dict = Body(...)):
+    """
+    Update the completion status of a task in the assignments collection.
+    
+    Request body:
+    - userId: str (required) - The ID of the user
+    - taskId: str (required) - The ID of the task
+    - isCompleted: bool (required) - The completion status (true for completed, false for pending)
+    """
+    db = request.app.state.db
+    
+    user_id = payload.get("userId")
+    task_id = payload.get("taskId")
+    is_completed = payload.get("isCompleted")
+    
+    # Validate required fields
+    if not user_id:
+        raise HTTPException(status_code=400, detail="userId is required")
+    
+    if not task_id:
+        raise HTTPException(status_code=400, detail="taskId is required")
+    
+    if is_completed is None:
+        raise HTTPException(status_code=400, detail="isCompleted is required")
+    
+    # Verify user assignment exists
+    assignment = await db.assignments.find_one({"userId": user_id})
+    if not assignment:
+        raise HTTPException(status_code=404, detail="No assignments found for this user")
+    
+    # Verify task exists in user's assignments
+    task_found = any(task.get("taskId") == task_id for task in assignment.get("tasks", []))
+    if not task_found:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Task {task_id} not found in user's assignments"
+        )
+    
+    # Update the task completion status
+    result = await db.assignments.update_one(
+        {"userId": user_id},
+        {"$set": {"tasks.$[elem].isCompleted": is_completed}},
+        array_filters=[{"elem.taskId": task_id}]
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=500, 
+            detail="Failed to update task completion status"
+        )
+    
+    return {
+        "status": "success",
+        "message": f"Task completion status updated to {'completed' if is_completed else 'pending'}",
+        "isCompleted": is_completed
+    }
