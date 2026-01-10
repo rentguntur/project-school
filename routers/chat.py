@@ -87,7 +87,7 @@ def parse_agent_response_to_tasks(response_text: str) -> List[Dict[str, Any]]:
 async def chat_with_agent(request: Request, agent_req: AgentRequest = Body(...)):
     """
     Invoke the learning agent for a user.
-    Optionally accepts a message parameter for special operations like agent name updates.
+    Accepts optional message parameter for conversational queries or task updates.
     Returns both a message and a structured tasks array for UI rendering.
     """
     db = request.app.state.db
@@ -106,16 +106,20 @@ async def chat_with_agent(request: Request, agent_req: AgentRequest = Body(...))
             status = "success"
             tasks = []  # No tasks for name update
         else:
-            # Regular learning agent invocation
+            # Regular learning agent invocation with optional message
             print("⚙️ Running learning agent...")
-            result = await run_learning_agent(db, user_id)
+            result = await run_learning_agent(db, user_id, message)
             agent_response = result.get("response_text", "I couldn't process your request.")
             status = result.get("status", "error")
             
-            # Parse the response to extract tasks
+            # Parse the response to extract tasks only if it looks like a task list
             print("🔍 Parsing response for tasks...")
-            tasks = parse_agent_response_to_tasks(agent_response)
-            print(f"✅ Extracted {len(tasks)} tasks from response")
+            if _is_task_list_response(agent_response):
+                tasks = parse_agent_response_to_tasks(agent_response)
+                print(f"✅ Extracted {len(tasks)} tasks from response")
+            else:
+                tasks = []
+                print("ℹ️ Response is conversational (no tasks to extract)")
         
         print(f"✅ Agent completed with status: {status}")
     except Exception as e:
@@ -145,6 +149,13 @@ async def chat_with_agent(request: Request, agent_req: AgentRequest = Body(...))
         "tasks": tasks,  # Add tasks array to response
         "status": status
     }
+
+
+def _is_task_list_response(text: str) -> bool:
+    """Check if response looks like a task list (has numbered items)"""
+    lines = text.strip().split('\n')
+    numbered_lines = [l for l in lines if l.strip() and l.strip()[0].isdigit()]
+    return len(numbered_lines) >= 3  # At least 3 numbered items
 
 
 @router.get("/history/{user_id}", response_model=list[Chat])

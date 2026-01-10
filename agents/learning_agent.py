@@ -10,9 +10,6 @@ from bson import ObjectId
 # Load environment variables
 load_dotenv()
 
-# LangSmith will automatically trace if environment variables are set
-# No additional code needed - just set LANGCHAIN_TRACING_V2=true in .env
-
 
 async def handle_agent_name_update(db, user_id: str, message: str) -> str:
     """
@@ -64,28 +61,37 @@ def get_learning_agent(db):
         def __init__(self, database):
             self.db = database
         
-        async def ainvoke(self, user_id: str):
+        async def ainvoke(self, user_id: str, message: str = None):
             """Invoke the agent for a specific user."""
-            return await run_learning_agent(self.db, user_id)
+            return await run_learning_agent(self.db, user_id, message)
     
     return SimpleLearningAgent(db)
 
 
-@traceable(name="Learning Agent", tags=["agent", "task-assignment"])
-async def run_learning_agent(db, user_id: str) -> dict:
+@traceable(name="Learning Agent", tags=["agent", "career-guidance"])
+async def run_learning_agent(db, user_id: str, user_message: str = None) -> dict:
     """
-    Simple learning agent that:
-    1. Fetches user goals
-    2. Fetches project and tasks
-    3. Recommends 6 tasks based on goals
-    4. Assigns tasks to user
+    Agentic learning assistant that:
+    1. Answers career and growth questions conversationally
+    2. Provides personalized task recommendations based on goals
+    3. Handles general career guidance queries
     
-    Uses LangGraph's create_react_agent for automatic tool calling.
+    Args:
+        db: Database connection
+        user_id: User identifier
+        user_message: Optional message from user. If "Updated the goals. Share the revised tasks.", 
+                     triggers task assignment mode. Otherwise, conversational mode.
     """
     try:
         print(f"\n{'='*60}")
         print(f"🚀 Starting learning agent for user: {user_id}")
+        print(f"📝 User message: {user_message}")
         print(f"{'='*60}\n")
+        
+        # Get agent name for personalized responses
+        agent_doc = await db.agents.find_one({"userId": user_id})
+        agent_name = agent_doc.get("agentName", "Study Buddy") if agent_doc else "Study Buddy"
+        print(f"🤖 Agent name: {agent_name}")
         
         # Initialize LLM
         api_key = os.getenv("GOOGLE_API_KEY")
@@ -118,22 +124,18 @@ async def run_learning_agent(db, user_id: str) -> dict:
                 goals = []
                 
                 if isinstance(goals_data, list):
-                    # It's a list - process each item
                     for item in goals_data:
-                        if item:  # Not None, not empty
-                            # Convert to string and strip
+                        if item:
                             item_str = str(item).strip()
-                            if item_str:  # Not empty after stripping
+                            if item_str:
                                 goals.append(item_str)
                 
                 elif isinstance(goals_data, str):
-                    # It's a string - strip and add if not empty
                     stripped = goals_data.strip()
                     if stripped:
                         goals.append(stripped)
                 
                 elif goals_data:
-                    # Unknown type but not None/empty - convert to string
                     goals.append(str(goals_data))
                 
                 print(f"✅ Parsed {len(goals)} goal(s): {goals}")
@@ -189,45 +191,28 @@ async def run_learning_agent(db, user_id: str) -> dict:
                 print(f"❌ Error: {str(e)}")
                 return [{"error": str(e)}]
         
-        @tool
-        async def assign_task_to_user(user_id: str, task_id: str) -> dict:
-            """Assign a task to a user."""
-            try:
-                print(f"📌 Assigning task {task_id} to {user_id}")
-                if not ObjectId.is_valid(task_id):
-                    return {"error": "Invalid task ID"}
-                
-                result = await db.tasks.update_one(
-                    {"_id": ObjectId(task_id)},
-                    {"$set": {"assigned_to": user_id}}
-                )
-                
-                if result.matched_count == 0:
-                    return {"error": f"Task {task_id} not found"}
-                
-                print(f"✅ Task assigned")
-                return {"status": "success", "task_id": task_id, "user_id": user_id}
-            except Exception as e:
-                print(f"❌ Error: {str(e)}")
-                return {"error": str(e)}
+        # Determine mode based on user message
+        is_task_assignment_mode = (
+            user_message and 
+            ("updated the goals" in user_message.lower() or 
+             "share the revised tasks" in user_message.lower() or
+             "share tasks" in user_message.lower())
+        )
         
-        # Collect tools
-        tools = [get_user_goals, get_project_details, get_project_tasks, assign_task_to_user]
-        
-        print("✅ Tools defined\n")
-        
-        # Create the system prompt
-        system_prompt = """You are an expert learning path advisor with access to tools.
+        if is_task_assignment_mode:
+            print("🎯 MODE: Task Assignment")
+            tools = [get_user_goals, get_project_details, get_project_tasks]
+            
+            system_prompt = f"""You are {agent_name}, an expert learning path advisor.
 
 Your task:
-1. Use get_user_goals tool to fetch the user's learning goals
-2. Use get_project_details tool to fetch project information for project_id: "695caa41c485455f397017ae"
-3. Use get_project_tasks tool to fetch ALL tasks for that project
-4. Carefully analyze user's learning goals against the project name, description, and each task's title and description
-5. Identify exactly 6 tasks in the specific order that creates an incremental learning path (foundation → intermediate → advanced)
-6. Use assign_task_to_user tool to assign each of the 6 tasks to the user in the correct learning sequence
+1. Use get_user_goals to fetch the user's learning goals
+2. Use get_project_details for project_id: "695caa41c485455f397017ae"
+3. Use get_project_tasks to fetch ALL tasks
+4. Analyze user goals vs tasks (title + description)
+5. Select exactly 6 tasks in progressive order (foundation → intermediate → advanced)
 
-RESPONSE FORMAT - After assigning tasks, return ONLY task titles in this exact format:
+RESPONSE FORMAT - Return ONLY task titles as a numbered list:
 1. [Task Title 1]
 2. [Task Title 2]
 3. [Task Title 3]
@@ -235,37 +220,77 @@ RESPONSE FORMAT - After assigning tasks, return ONLY task titles in this exact f
 5. [Task Title 5]
 6. [Task Title 6]
 
-IMPORTANT RULES:
-- Read actual task content (title AND description) before recommending
-- Ensure logical progression: easier concepts first, then build complexity
-- Match tasks closely to user's stated learning goals
-- Foundation task: Basic concepts, prerequisites, introductory material
-- Intermediate task: Building on basics, practical application
-- Advanced task: Complex topics, integration, real-world projects
-- Assign ALL 6 tasks to the user using assign_task_to_user tool
-- Return ONLY the 6 task titles as a numbered list in your final response (no explanations)"""
+RULES:
+- Match tasks to user's stated goals
+- Ensure logical learning progression
+- No explanations, just the numbered list"""
 
-        user_prompt = f"""User ID: {user_id}
+            user_prompt = f"""User ID: {user_id}
 
-Please create my personalized learning path:
+Create my personalized learning path:
 1. Fetch my learning goals
-2. Fetch project "695caa41c485455f397017ae" and ALL its tasks
-3. Analyze which tasks best match my goals
-4. Select exactly 6 tasks in order: foundation → intermediate → advanced
-5. Assign all 6 tasks to me using assign_task_to_user tool
-6. Return ONLY the 6 task titles as a numbered list
+2. Fetch project and all tasks
+3. Select 6 tasks matching my goals in learning order
+4. Return ONLY the numbered list of task titles"""
+            
+        else:
+            print("💬 MODE: Conversational Career Guidance")
+            tools = [get_user_goals]
+            
+            system_prompt = f"""You are {agent_name}, a friendly and knowledgeable career advisor specializing in AI/ML, Data Science, and tech careers.
 
-Remember: The order matters! Start with foundational concepts, then build up to advanced topics."""
+YOUR EXPERTISE:
+- Career roadmaps (AI/ML, Data Science, Software Engineering)
+- Learning paths and skill development
+- Industry trends and job market insights
+- Project recommendations
+- Resume and interview guidance
+- Career transitions and upskilling
 
+CONVERSATION STYLE:
+- Warm, encouraging, and professional
+- Provide specific, actionable advice
+- Use examples and real-world insights
+- Be honest about timelines and effort required
+
+BOUNDARIES:
+You can answer questions about:
+✅ Career paths in tech (AI/ML, Data Science, Software Engineering)
+✅ Learning roadmaps and skill development
+✅ Project ideas and portfolio building
+✅ Industry trends and job opportunities
+✅ Interview preparation and resume tips
+✅ Course and certification recommendations
+
+For questions OUTSIDE these topics (personal problems, non-tech careers, medical/legal advice, etc.):
+❌ Politely decline and say: "I'm {agent_name}, focused on tech career growth. For other matters, please contact Vijender P at support@alumnx.com"
+
+IMPORTANT:
+- Use get_user_goals tool to understand user's current goals
+- Reference their goals in your advice when relevant
+- Keep responses concise (2-3 paragraphs max)
+- End with a follow-up question to continue the conversation"""
+
+            if user_message:
+                user_prompt = f"""User message: {user_message}
+
+User ID: {user_id}
+
+Please respond to the user's question. First, fetch their learning goals to provide personalized advice."""
+            else:
+                user_prompt = f"""User ID: {user_id}
+
+The user has just updated their goals. Fetch their goals and provide an encouraging welcome message about their learning journey."""
+        
         print("🤖 Creating LangGraph ReAct agent...\n")
         
-        # Create the ReAct agent - LangGraph handles all the tool calling logic!
+        # Create the ReAct agent
         agent = create_react_agent(llm, tools)
         
         print("✅ Agent created\n")
-        print("🔄 Running agent (LangGraph will handle tool calls automatically)...\n")
+        print("📄 Running agent...\n")
         
-        # Run the agent with system prompt in messages
+        # Run the agent
         result = await agent.ainvoke({
             "messages": [
                 SystemMessage(content=system_prompt),
@@ -275,7 +300,7 @@ Remember: The order matters! Start with foundational concepts, then build up to 
         
         print("✅ Agent execution completed\n")
         
-        # Extract final response from the last message
+        # Extract final response
         final_message = result["messages"][-1]
         final_response = final_message.content if hasattr(final_message, 'content') else str(final_message)
         
@@ -299,7 +324,7 @@ Remember: The order matters! Start with foundational concepts, then build up to 
         return {
             "response_text": final_response,
             "status": "success",
-            "messages": result["messages"]  # Optional: include full message history
+            "messages": result["messages"]
         }
         
     except Exception as e:
