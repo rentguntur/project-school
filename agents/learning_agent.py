@@ -373,18 +373,18 @@ async def run_learning_agent(db, user_id: str, user_message: str = None) -> dict
             NO markdown, NO explanation, NO other text - ONLY the JSON array."""
 
             user_prompt = f"""User ID: {user_id}
-Project ID: 695caa41c485455f397017ae
+            Project ID: 695caa41c485455f397017ae
 
-Execute the steps:
-1. Get user goals
-2. Get assigned tasks
-3. Get project details  
-4. Get all project tasks
-5. Filter out assigned tasks
-6. Select 6 best unassigned tasks for user's goals
-7. Return ONLY JSON array with those 6 tasks
+            Execute the steps:
+            1. Get user goals
+            2. Get assigned tasks
+            3. Get project details  
+            4. Get all project tasks
+            5. Filter out assigned tasks
+            6. Select 6 best unassigned tasks for user's goals
+            7. Return ONLY JSON array with those 6 tasks
 
-Remember: Use ONLY tasks from get_project_tasks response. Do NOT invent tasks."""
+            Remember: Use ONLY tasks from get_project_tasks response. Do NOT invent tasks."""
 
         else:
             print("💬 MODE: Conversational Career Guidance")
